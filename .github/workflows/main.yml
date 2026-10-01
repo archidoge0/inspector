@@ -2,7 +2,8 @@ name: Run install, format, lint, build, and test on every push
 
 on:
   push:
-    branches: ['codex/ghav-inspector2160-*']
+    branches: ['codex/ghav-inspector2160-*', 'ghav/inspector2160-trace']
+  workflow_dispatch:
   # A published GitHub release triggers the `publish` job below. The release's
   # target commit determines which workflow runs — so this only publishes when a
   # release is cut from a commit that carries this (v2) workflow.
