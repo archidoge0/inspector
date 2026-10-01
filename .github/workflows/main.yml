@@ -21,6 +21,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    env:
+      UV_USE_IO_URING: "0"
+      GHAV_TRACE_DIR: /home/runner/ghav-trace
 
     steps:
       - name: Checkout code
@@ -32,13 +35,25 @@ jobs:
           node-version: '22.23.3'
           cache: 'npm'
 
+      - name: Install strace (ghav trace)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq strace
+          strace -V | head -1
+
       - name: Install dependencies (root + all clients)
+        shell: bash /home/runner/work/inspector/inspector/.github/ghav/trace-shell.sh {0}
+        env:
+          GHAV_STEP: install
         # The root postinstall (scripts/install-clients.mjs) cascades
         # `npm install` into clients/web, clients/cli, clients/tui, and
         # clients/launcher, so this single step sets up every client.
         run: npm install
 
       - name: Validate (coverage guards, format, lint, typecheck, build, fast tests)
+        shell: bash /home/runner/work/inspector/inspector/.github/ghav/trace-shell.sh {0}
+        env:
+          GHAV_STEP: validate
         # Runs the two coverage guards first (verify:format-coverage +
         # verify:typecheck-coverage), then validate:core, then each client's
         # self-validation: format:check + lint + typecheck + build + test (no
@@ -52,6 +67,9 @@ jobs:
         run: npm run validate
 
       - name: Enforce per-file coverage gate (≥90% on all four dimensions)
+        shell: bash /home/runner/work/inspector/inspector/.github/ghav/trace-shell.sh {0}
+        env:
+          GHAV_STEP: coverage
         # CI-ENFORCED coverage gate (#1550): runs `npm run coverage`, which
         # chains every client's `test:coverage` (v8-instrumented) and fails the
         # job if ANY file drops below 90% on lines, statements, functions, or
@@ -66,6 +84,9 @@ jobs:
         run: npm run coverage
 
       - name: Verify the browser-externalized-builtin build gate (#1769)
+        shell: bash /home/runner/work/inspector/inspector/.github/ghav/trace-shell.sh {0}
+        env:
+          GHAV_STEP: verify-build-gate
         # Runs a real `vite build` with a Node built-in forced into the browser
         # graph and asserts the build FAILS via the #1769 gate. The unit tests
         # cover the detection logic against a captured message; only this real
@@ -75,6 +96,9 @@ jobs:
         run: npm run verify:build-gate
 
       - name: Verify no externalized dependency was inlined (#2067)
+        shell: bash /home/runner/work/inspector/inspector/.github/ghav/trace-shell.sh {0}
+        env:
+          GHAV_STEP: verify-bundle-externals
         # The mirror of the "must be bundled" rule. `undici` was declared only in
         # the root and `clients/cli` manifests, so tsup — which auto-externalizes
         # what the NEAREST manifest declares — inlined 1.05MB of it into the web
@@ -97,10 +121,16 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('clients/web/package-lock.json') }}
 
       - name: Install Playwright browsers
+        shell: bash /home/runner/work/inspector/inspector/.github/ghav/trace-shell.sh {0}
+        env:
+          GHAV_STEP: playwright-install
         working-directory: ./clients/web
         run: npx playwright install --with-deps chromium
 
       - name: Run cross-client smokes
+        shell: bash /home/runner/work/inspector/inspector/.github/ghav/trace-shell.sh {0}
+        env:
+          GHAV_STEP: smoke
         # End-to-end smokes through the built launcher (--help dispatch + prod
         # CLI/web). Not part of any client's `validate`: it needs the
         # cli/tui/launcher bundles, which `validate` above already built
@@ -113,8 +143,39 @@ jobs:
         run: npm run smoke
 
       - name: Run Storybook play-function tests
+        shell: bash /home/runner/work/inspector/inspector/.github/ghav/trace-shell.sh {0}
+        env:
+          GHAV_STEP: storybook
         working-directory: ./clients/web
         run: npm run test:storybook
+
+      - name: Summarize traces (ghav)
+        if: always()
+        run: python3 .github/ghav/summarize.py /home/runner/ghav-trace-summary.json.gz
+
+      - name: Pack raw traces (ghav)
+        if: always()
+        run: |
+          sudo tar -C /home/runner -czf /home/runner/ghav-trace-raw.tgz ghav-trace
+          ls -la /home/runner/ghav-trace-summary.json.gz /home/runner/ghav-trace-raw.tgz
+          du -sh /home/runner/ghav-trace
+
+      - name: Upload trace summary (ghav)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghav-trace-summary
+          path: /home/runner/ghav-trace-summary.json.gz
+          retention-days: 14
+
+      - name: Upload raw traces (ghav)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghav-trace-raw
+          path: /home/runner/ghav-trace-raw.tgz
+          compression-level: 0
+          retention-days: 7
 
   # Publish the single `@modelcontextprotocol/inspector` package to npm on a
   # published GitHub release. v2 is not an npm workspace, so there is no
