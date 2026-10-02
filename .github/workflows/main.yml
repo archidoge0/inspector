@@ -2,7 +2,8 @@ name: Run install, format, lint, build, and test on every push
 
 on:
   push:
-    branches: ['codex/ghav-inspector2160-*']
+    branches: ['codex/ghav-inspector2160-*', 'ghav/inspector2160-ni']
+  workflow_dispatch:
   # A published GitHub release triggers the `publish` job below. The release's
   # target commit determines which workflow runs — so this only publishes when a
   # release is cut from a commit that carries this (v2) workflow.
@@ -51,6 +52,12 @@ jobs:
         # jobs, but that's a larger restructure and deliberately out of scope.
         run: npm run validate
 
+      - name: Save state after validate (ghav ni)
+        run: |
+          mkdir -p ~/ghav-ni/runs
+          ls -la ~/.mcp-inspector/storage/ || true
+          cp ~/.mcp-inspector/storage/oauth.json ~/ghav-ni/oauth.validate.json || echo "no oauth.json after validate"
+
       - name: Enforce per-file coverage gate (≥90% on all four dimensions)
         # CI-ENFORCED coverage gate (#1550): runs `npm run coverage`, which
         # chains every client's `test:coverage` (v8-instrumented) and fails the
@@ -64,6 +71,13 @@ jobs:
         # standalone `Run web integration tests` step was removed to avoid
         # running the integration suite twice.
         run: npm run coverage
+
+      - name: Save state after coverage (ghav ni)
+        run: |
+          ls -la ~/.mcp-inspector/storage/ || true
+          cp ~/.mcp-inspector/storage/oauth.json ~/ghav-ni/oauth.coverage.json || echo "no oauth.json after coverage"
+          sha256sum ~/ghav-ni/oauth.*.json || true
+          cmp ~/ghav-ni/oauth.validate.json ~/ghav-ni/oauth.coverage.json && echo "oauth.json identical" || echo "oauth.json differs"
 
       - name: Verify the browser-externalized-builtin build gate (#1769)
         # Runs a real `vite build` with a Node built-in forced into the browser
@@ -110,11 +124,59 @@ jobs:
         # composable MCP App server (#1859). Both reuse the chromium installed
         # above. smoke:tui self-skips here — the Ink TUI needs a real TTY (raw
         # mode) that headless CI lacks, so its boot/render check is local-only.
-        run: npm run smoke
+        # GHAV NI: run the smokes with oauth.json as coverage left it (A, original),
+        # as validate left it (B, after moving coverage), and absent (C).
+        run: |
+          set +e
+          st=~/.mcp-inspector/storage
+          snap=~/ghav-ni/mcp.before-smoke
+          rm -rf "$snap"; cp -a ~/.mcp-inspector "$snap"
+          one() {
+            rm -rf ~/.mcp-inspector; cp -a "$snap" ~/.mcp-inspector
+            if [ "$2" = absent ]; then rm -f "$st/oauth.json"; else cp "$2" "$st/oauth.json"; fi
+            (sha256sum "$st/oauth.json" 2>/dev/null || echo absent) > ~/ghav-ni/runs/smoke-$1.oauth
+            npm run smoke > ~/ghav-ni/runs/smoke-$1.log 2>&1; echo $? > ~/ghav-ni/runs/smoke-$1.exit
+            (cd ~/.mcp-inspector && find . -type f ! -path ./storage/oauth.json -exec sha256sum {} + | sort) > ~/ghav-ni/runs/smoke-$1.state
+            echo "smoke $1: exit $(cat ~/ghav-ni/runs/smoke-$1.exit)"
+          }
+          one A1 ~/ghav-ni/oauth.coverage.json
+          one B1 ~/ghav-ni/oauth.validate.json
+          one C1 absent
+          one B2 ~/ghav-ni/oauth.validate.json
+          one A2 ~/ghav-ni/oauth.coverage.json
+          exit 0
 
       - name: Run Storybook play-function tests
         working-directory: ./clients/web
-        run: npm run test:storybook
+        # GHAV NI: run storybook with clients/web/coverage present (P, original)
+        # and absent (Q, after moving coverage).
+        run: |
+          set +e
+          cov="$GITHUB_WORKSPACE/clients/web/coverage"
+          bak=~/ghav-ni/coverage.bak
+          rm -rf "$bak"; [ -d "$cov" ] && cp -a "$cov" "$bak"
+          one() {
+            rm -rf "$cov"; [ "$2" = present ] && [ -d "$bak" ] && cp -a "$bak" "$cov"
+            npm run test:storybook > ~/ghav-ni/runs/storybook-$1.log 2>&1; echo $? > ~/ghav-ni/runs/storybook-$1.exit
+            echo "storybook $1: exit $(cat ~/ghav-ni/runs/storybook-$1.exit)"
+          }
+          one P1 present
+          one Q1 absent
+          one Q2 absent
+          one P2 present
+          exit 0
+
+      - name: Summarize NI runs (ghav)
+        if: always()
+        run: python3 .github/ghav/ni_summary.py ~/ghav-ni/runs | tee ~/ghav-ni/summary.txt
+
+      - name: Upload NI logs (ghav)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghav-ni
+          path: /home/runner/ghav-ni
+          retention-days: 14
 
   # Publish the single `@modelcontextprotocol/inspector` package to npm on a
   # published GitHub release. v2 is not an npm workspace, so there is no
